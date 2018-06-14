@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,7 +22,7 @@ import (
 )
 
 func read(done <-chan struct{}, reader *csv.Reader, config config) (<-chan []string, <-chan error) {
-	records := make(chan []string, config.workers)
+	records := make(chan []string, config.Workers)
 	errc := make(chan error, 1)
 
 	go func() {
@@ -50,12 +51,6 @@ func read(done <-chan struct{}, reader *csv.Reader, config config) (<-chan []str
 	return records, errc
 }
 
-type result struct {
-	line     int
-	affected int
-	err      error
-}
-
 func nullify(value string) interface{} {
 	if value == "null" {
 		return sql.NullString{}
@@ -64,56 +59,135 @@ func nullify(value string) interface{} {
 	return value
 }
 
-func nullifyImportId(importId int) string {
+func nullifyImportId(importId int) interface{} {
 	if importId == 0 {
-		return "NULL"
+		return sql.NullString{}
 	}
 
-	return fmt.Sprintf("%d", importId)
+	return importId
 }
 
-func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []string, results chan<- result) {
-	query := fmt.Sprintf(
-		`INSERT INTO %s (
+type ingestResult struct {
+	Processed int
+	Affected  int
+}
+
+func buildQuery(table string, n int) string {
+	sql :=
+		`WITH inserted AS (
+		INSERT INTO %s (
 			_dw_last_import_id, marketoguid, leadid, activitydate, activitytypeid,
 			campaignid, primaryattributevalueid, primaryattributevalue, attributes
-		) VALUES (%s, $1, $2, $3, $4, $5, $6, $7, $8)
+		) VALUES %s
 		ON CONFLICT (marketoguid) DO NOTHING
-		RETURNING _dw_id`,
-		config.table,
-		nullifyImportId(config.importId),
+		RETURNING 1
 	)
+	SELECT COUNT(*) FROM inserted`
 
-	stmt, err := db.Prepare(query)
+	v := make([]string, n)
+	p := make([]string, 9)
+	m := 0
+	for i := 0; i < n; i++ {
+		for j := 0; j < 9; j++ {
+			m++
+			p[j] = fmt.Sprintf("$%d", m)
+		}
+		v[i] = fmt.Sprintf("(%s)", strings.Join(p, ","))
+	}
+
+	return fmt.Sprintf(sql, table, strings.Join(v, ","))
+}
+
+func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []string, results chan<- ingestResult) {
+	txCount := 0
+	inCount := 0
+	inAffected := 0
+	processed := 0
+	affected := 0
+	importId := nullifyImportId(config.ImportId)
+
+	bindings := make([]interface{}, config.InsertSize*9)
+
+	// Build the query that will be used in a loop
+	query := buildQuery(config.Table, config.InsertSize)
+	// Open a transaction and prepare the statement
+	tx, err := db.Begin()
+	stmt, err := tx.Prepare(query)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer stmt.Close()
 
 	for record := range records {
-		nullified := make([]interface{}, 8)
+		// If we reached the TxSize number of affected records
+		// commit the transaction, reset the counter and immediately open a new one
+		if txCount >= config.TxSize {
+			stmt.Close()
+			err := tx.Commit()
+			if err != nil {
+				log.Fatal(err)
+			}
 
+			txCount = 0
+			tx, err = db.Begin()
+			stmt, err = tx.Prepare(query)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+
+		// If we accumulated InserSize number of records
+		// perform the multi-row insert and reset the counter
+		if inCount >= config.InsertSize {
+			err := stmt.QueryRow(bindings...).Scan(&inAffected)
+			if err != nil {
+				stmt.Close()
+				tx.Rollback()
+				// TODO: Revisit and communicate the error via an error channel
+				log.Fatal(err)
+			}
+			affected += inAffected
+			processed += config.InsertSize
+			inCount = 0
+		}
+
+		// Accumulate bindings for the insert query
+		bindings[inCount*9] = importId
 		for i, value := range record {
-			nullified[i] = nullify(value)
+			bindings[inCount*9+i+1] = nullify(value)
 		}
+		inCount++
+	}
+	// Close the prepared statement
+	stmt.Close()
 
-		affected := 1
-		lastId := 0
-		err := stmt.QueryRow(nullified...).Scan(&lastId)
-		if err == sql.ErrNoRows {
-			affected = 0
-			err = nil
+	// If there are left over records
+	// adjust the query accordingly and perform the insert
+	if inCount > 0 {
+		query = buildQuery(config.Table, inCount)
+		err := tx.QueryRow(query, bindings[0:inCount*9]...).Scan(&inAffected)
+		if err != nil {
+			tx.Rollback()
+			// TODO: Revisit and communicate the error via an error channel
+			log.Fatal(err)
 		}
+		affected += inAffected
+		processed += inCount
+	}
 
-		select {
-		case results <- result{0, affected, err}:
-		case <-done:
-			return
-		}
+	// Commit the very last transaction
+	err = tx.Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	select {
+	case results <- ingestResult{processed, affected}:
+	case <-done:
+		return
 	}
 }
 
-func ingestAll(reader *csv.Reader, db *sql.DB, config config) (int, error) {
+func ingestAll(reader *csv.Reader, db *sql.DB, config config) (ingestResult, error) {
 	done := make(chan struct{})
 	defer close(done)
 
@@ -124,12 +198,12 @@ func ingestAll(reader *csv.Reader, db *sql.DB, config config) (int, error) {
 	records, errc := read(done, reader, config)
 
 	// Start a fixed number of ingest workers
-	results := make(chan result)
+	results := make(chan ingestResult)
 
 	var wg sync.WaitGroup
 
-	wg.Add(config.workers)
-	for i := 0; i < config.workers; i++ {
+	wg.Add(config.Workers)
+	for i := 0; i < config.Workers; i++ {
 		go func() {
 			ingest(db, config, done, records, results)
 			wg.Done()
@@ -141,53 +215,52 @@ func ingestAll(reader *csv.Reader, db *sql.DB, config config) (int, error) {
 	}()
 
 	// Receive all the results from results channel then check the error from errc channel
-	affected := 0
+	totals := ingestResult{0, 0}
 
 	for result := range results {
-		if result.err != nil {
-			return -1, result.err
-		}
-		affected += result.affected
+		totals.Processed += result.Processed
+		totals.Affected += result.Affected
 	}
 	// Check whether the ingest failed
 	if err := <-errc; err != nil {
-		return -1, err
+		return ingestResult{0, 0}, err
 	}
 
-	return affected, nil
+	return totals, nil
 }
 
 func memoryUsage() uint64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	return m.TotalAlloc
+	return m.Sys
 }
 
 type config struct {
-	importId int
-	table    string
-	workers  int
+	ImportId   int
+	Table      string
+	Workers    int
+	InsertSize int
+	TxSize     int
 }
 
 type totals struct {
-	TotalRecords    int
-	AffectedRecords int
-	Duration        time.Duration
-	Memory          uint64
+	Records  ingestResult
+	Duration time.Duration
+	Memory   uint64
 }
 
 func printTotals(totals *totals) {
 	fmt.Printf(
-		"Total %d records, time %v, memory %.3fMb\n",
-		totals.AffectedRecords,
+		"Total %d, affected %d, time %v, memory %.3fMb\n",
+		totals.Records.Processed,
+		totals.Records.Affected,
 		totals.Duration,
 		float64(totals.Memory)/1024/1024,
 	)
 }
 
 func printTotalsJSON(totals *totals) {
-	// fmt.Println(totals)
 	json, _ := json.MarshalIndent(totals, "", "   ")
 	fmt.Printf("%s\n", json)
 }
@@ -198,17 +271,19 @@ func main() {
 		config     config
 		maxProcs   int
 		totals     totals
-		outJSON    bool
+		outputJSON bool
 		reader     *csv.Reader
 		baseReader *bufio.Reader
 	)
 
 	flag.StringVar(&dbConn, "c", "", "Database connection string")
-	flag.IntVar(&config.workers, "w", 4, "Number of workers")
-	flag.IntVar(&config.importId, "i", 0, "Import Id")
-	flag.StringVar(&config.table, "t", "marketo.activities", "Database table")
+	flag.IntVar(&config.Workers, "w", 4, "Number of workers")
+	flag.IntVar(&config.ImportId, "i", 0, "Import Id")
+	flag.StringVar(&config.Table, "t", "marketo.activities", "Database table")
 	flag.IntVar(&maxProcs, "p", 1, "Max logical processors")
-	flag.BoolVar(&outJSON, "j", false, "Output totals in JSON")
+	flag.BoolVar(&outputJSON, "j", false, "Output totals in JSON")
+	flag.IntVar(&config.InsertSize, "m", 2, "Number of records per insert")
+	flag.IntVar(&config.TxSize, "x", 25000, "Number of records per transaction")
 
 	flag.Usage = func() {
 		fmt.Printf("Usage: %s [options] [file]\n", filepath.Base(os.Args[0]))
@@ -264,17 +339,17 @@ func main() {
 		log.Fatal(err)
 	}
 
-	affected, err := ingestAll(reader, db, config)
+	results, err := ingestAll(reader, db, config)
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
 
-	totals.AffectedRecords = affected
+	totals.Records = results
 	totals.Duration = time.Since(start)
 	totals.Memory = memoryUsage()
 
-	if outJSON {
+	if outputJSON {
 		printTotalsJSON(&totals)
 	} else {
 		printTotals(&totals)
