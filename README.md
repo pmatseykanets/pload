@@ -33,7 +33,7 @@ Usage: pload [options] [file]
 
 ## Activity data
 
-The following is an example of the default activity file in CSV format. Note that the "attributes" field is formatted as JSON.
+The following is an example of the default activity file in CSV format. Note that the `attributes` field is formatted as JSON.
 
 ```
 marketoGUID,leadId,activityDate,activityTypeId,campaignId,primaryAttributeValueId,primaryAttributeValue, attributes
