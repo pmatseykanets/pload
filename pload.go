@@ -279,14 +279,16 @@ func main() {
 	flag.StringVar(&dbConn, "c", "", "Database connection string")
 	flag.IntVar(&config.Workers, "w", 4, "Number of workers")
 	flag.IntVar(&config.ImportId, "i", 0, "Import Id")
-	flag.StringVar(&config.Table, "t", "marketo.activities", "Database table")
+	flag.StringVar(&config.Table, "t", "marketo.activities", "Database table to load data into")
 	flag.IntVar(&maxProcs, "p", 1, "Max logical processors")
-	flag.BoolVar(&outputJSON, "j", false, "Output totals in JSON")
+	flag.BoolVar(&outputJSON, "json", false, "Output results in JSON")
 	flag.IntVar(&config.InsertSize, "m", 2, "Number of records per insert")
 	flag.IntVar(&config.TxSize, "x", 25000, "Number of records per transaction")
 
 	flag.Usage = func() {
 		fmt.Printf("Usage: %s [options] [file]\n", filepath.Base(os.Args[0]))
+		fmt.Println("  file")
+		fmt.Println("    	A CSV file to load. If omitted read from stdin")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
