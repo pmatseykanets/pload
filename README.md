@@ -1,15 +1,11 @@
 # pload
 
-`pload` is an experimental tool for ingesting Marketo Activity feeds concurently into the DW.
-
-## Installation
-
-It is strongly recommended that you use a released version. Release binaries are available on the [releases](https://github.com/questex/pload/releases) page.
+`pload` is an experimental tool for ingesting Marketo Activity feeds concurrently into the DW.
 
 ## Usage
 
 ```bash
-$ pload -h
+pload -h
 Usage: pload [options] [file]
   file
         A CSV file to load. If omitted read from stdin
@@ -33,11 +29,11 @@ Usage: pload [options] [file]
 
 ## Activity data
 
-The following is an example of the default activity file in CSV format. Note that the `attributes` field is formatted as JSON.
+The following is an example of the activity file in CSV format. Note that the `attributes` field's value is serialized as JSON.
 
 ```
 marketoGUID,leadId,activityDate,activityTypeId,campaignId,primaryAttributeValueId,primaryAttributeValue, attributes
-122323,6,2013-09-26T06:56:35+0000,12,11,6,Owyliphys Iledil,[{"name":"Source Type","value":"Web page visit"}]
+12345,54321,2018-01-26T06:56:35+0000,12,11,6,Jhon Doe,[{"name":"Source Type","value":"Web page visit"}]
 ```
 
 You can find more information in the [Marketo documentation](http://developers.marketo.com/rest-api/bulk-extract/bulk-activity-extract/)
