@@ -1,5 +1,7 @@
 *.test
 *.out
+/.idea
+/.vscode
 /pload
 /debug
 /release
