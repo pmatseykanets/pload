@@ -17,8 +17,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	_ "github.com/lib/pq"
 )
 
 func read(done <-chan struct{}, reader *csv.Reader, config config) (<-chan []string, <-chan error) {
@@ -73,11 +71,17 @@ type ingestResult struct {
 }
 
 func buildQuery(table string, n int) string {
-	sql :=
+	SQL :=
 		`WITH inserted AS (
 		INSERT INTO %s (
-			_dw_last_import_id, marketoguid, leadid, activitydate, activitytypeid,
-			campaignid, primaryattributevalueid, primaryattributevalue, attributes
+			marketoguid, 
+			leadid, 
+			activitydate, 
+			activitytypeid,
+			campaignid, 
+			primaryattributevalueid, 
+			primaryattributevalue, 
+			attributes
 		) VALUES %s
 		ON CONFLICT (marketoguid) DO NOTHING
 		RETURNING 1
@@ -85,17 +89,17 @@ func buildQuery(table string, n int) string {
 	SELECT COUNT(*) FROM inserted`
 
 	v := make([]string, n)
-	p := make([]string, 9)
+	p := make([]string, 8)
 	m := 0
 	for i := 0; i < n; i++ {
-		for j := 0; j < 9; j++ {
+		for j := 0; j < 8; j++ {
 			m++
 			p[j] = fmt.Sprintf("$%d", m)
 		}
 		v[i] = fmt.Sprintf("(%s)", strings.Join(p, ","))
 	}
 
-	return fmt.Sprintf(sql, table, strings.Join(v, ","))
+	return fmt.Sprintf(SQL, table, strings.Join(v, ","))
 }
 
 func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []string, results chan<- ingestResult) {
@@ -135,7 +139,7 @@ func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []st
 			}
 		}
 
-		// If we accumulated InserSize number of records
+		// If we accumulated InsertSize number of records
 		// perform the multi-row insert and reset the counter
 		if inCount >= config.InsertSize {
 			err := stmt.QueryRow(bindings...).Scan(&inAffected)
