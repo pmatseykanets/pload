@@ -1,6 +1,6 @@
 # pload
 
-`pload` is an experimental tool for ingesting Marketo Activity feeds concurrently into the DW.
+`pload` is an experimental tool for ingesting Marketo Activity feeds concurrently into a PostgreSQL database.
 
 ## Usage
 
