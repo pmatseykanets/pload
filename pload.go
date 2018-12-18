@@ -17,14 +17,20 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	_ "github.com/lib/pq"
 )
+
+const fieldCount int = 8
+
+var logger = log.New(os.Stdout, "", log.LstdFlags|log.Lshortfile)
 
 func read(done <-chan struct{}, reader *csv.Reader, config config) (<-chan []string, <-chan error) {
 	records := make(chan []string, config.Workers)
 	errc := make(chan error, 1)
 
 	go func() {
-		// Close records channel after reading finished
+		// Close records channel after reading is finished
 		defer close(records)
 
 		for {
@@ -89,10 +95,10 @@ func buildQuery(table string, n int) string {
 	SELECT COUNT(*) FROM inserted`
 
 	v := make([]string, n)
-	p := make([]string, 8)
+	p := make([]string, fieldCount)
 	m := 0
 	for i := 0; i < n; i++ {
-		for j := 0; j < 8; j++ {
+		for j := 0; j < fieldCount; j++ {
 			m++
 			p[j] = fmt.Sprintf("$%d", m)
 		}
@@ -110,7 +116,7 @@ func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []st
 	affected := 0
 	importId := nullifyImportId(config.ImportId)
 
-	bindings := make([]interface{}, config.InsertSize*9)
+	bindings := make([]interface{}, config.InsertSize*fieldCount)
 
 	// Build the query that will be used in a loop
 	query := buildQuery(config.Table, config.InsertSize)
@@ -118,7 +124,7 @@ func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []st
 	tx, err := db.Begin()
 	stmt, err := tx.Prepare(query)
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 	}
 
 	for record := range records {
@@ -128,14 +134,14 @@ func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []st
 			stmt.Close()
 			err := tx.Commit()
 			if err != nil {
-				log.Fatal(err)
+				logger.Fatal(err)
 			}
 
 			txCount = 0
 			tx, err = db.Begin()
 			stmt, err = tx.Prepare(query)
 			if err != nil {
-				log.Fatal(err)
+				logger.Fatal(err)
 			}
 		}
 
@@ -147,7 +153,7 @@ func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []st
 				stmt.Close()
 				tx.Rollback()
 				// TODO: Revisit and communicate the error via an error channel
-				log.Fatal(err)
+				logger.Fatal(err)
 			}
 			affected += inAffected
 			processed += config.InsertSize
@@ -155,9 +161,9 @@ func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []st
 		}
 
 		// Accumulate bindings for the insert query
-		bindings[inCount*9] = importId
+		bindings[inCount*fieldCount] = importId
 		for i, value := range record {
-			bindings[inCount*9+i+1] = nullify(value)
+			bindings[inCount*fieldCount+i] = nullify(value)
 		}
 		inCount++
 	}
@@ -168,11 +174,11 @@ func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []st
 	// adjust the query accordingly and perform the insert
 	if inCount > 0 {
 		query = buildQuery(config.Table, inCount)
-		err := tx.QueryRow(query, bindings[0:inCount*9]...).Scan(&inAffected)
+		err := tx.QueryRow(query, bindings[0:inCount*fieldCount]...).Scan(&inAffected)
 		if err != nil {
 			tx.Rollback()
 			// TODO: Revisit and communicate the error via an error channel
-			log.Fatal(err)
+			logger.Fatal(err)
 		}
 		affected += inAffected
 		processed += inCount
@@ -181,7 +187,7 @@ func ingest(db *sql.DB, config config, done <-chan struct{}, records <-chan []st
 	// Commit the very last transaction
 	err = tx.Commit()
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 	}
 
 	select {
@@ -309,7 +315,7 @@ func main() {
 		path := flag.Args()[0]
 		file, err := os.Open(path)
 		if err != nil {
-			log.Fatalf("Can't open input file '%s'", path)
+			logger.Fatalf("Can't open input file '%s'", path)
 		}
 		defer file.Close()
 
@@ -319,7 +325,7 @@ func main() {
 	// Read magic bytes in hope to detect gzip
 	bytes, err := baseReader.Peek(2)
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 	}
 
 	// The RFC 1952: GZIP file format specification version 4.3
@@ -327,7 +333,7 @@ func main() {
 	if bytes[0] == 0x1f && bytes[1] == 0x8b {
 		gzipReader, err := gzip.NewReader(baseReader)
 		if err != nil {
-			log.Fatal(err)
+			logger.Fatal(err)
 		}
 		reader = csv.NewReader(gzipReader)
 	} else {
@@ -336,18 +342,18 @@ func main() {
 
 	db, err := sql.Open("postgres", dbConn)
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 	}
 	defer db.Close()
 
 	err = db.Ping()
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 	}
 
 	results, err := ingestAll(reader, db, config)
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 		return
 	}
 
